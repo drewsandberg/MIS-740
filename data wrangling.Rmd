@@ -1,0 +1,116 @@
+---
+title: "MIS 740 Term Project"
+author: "Drew Sandberg"
+date: "2/3/2021"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse) #general data wrangling 
+library(lubridate) #date manipulation
+library(tm) #text mining package
+```
+
+```{r message=FALSE}
+#Read in the source file from github into a data.frame name "raw".
+raw = as.data.frame(read_csv("https://raw.githubusercontent.com/drewsandberg/MIS-740/main/kiva_sampling15k.csv"))
+```
+
+
+```{r message=FALSE, warning=FALSE}
+#Split country in to a seperate dimenstion table; might be useful if you 
+country = data.frame(country_code = raw$COUNTRY_CODE,
+                     country = raw$COUNTRY_NAME)
+
+#Set up a date dimension table, if you ever want to use it.
+calendar = data.frame(date = seq(min(as.Date(raw$POSTED_TIME)),max(as.Date(subset(raw$POSTED_TIME, !is.na(raw$POSTED_TIME)))), by = 'days'))
+calendar = calendar %>%
+  mutate(day_of_week = wday(date),
+         month = month(date),
+         week_number = week(date))
+
+#Dropping columns
+# a) original_language is all "English", not relevant
+# b) country_name is moved to a dimension table
+# c) image_id is not relevant; FK to other dimension table not provided.
+# d) days to funded appears to have been a floor(raised_time - posted_time) function; for under day the # of days is 0.
+df = raw %>%
+  select(-c("ORIGINAL_LANGUAGE", "COUNTRY_NAME", "IMAGE_ID", "DAYS_TO_FUNDED")) %>%
+  mutate(days_to_funded = round((raw$RAISED_TIME - raw$POSTED_TIME)/24,2),
+         day_of_week_requested = wday(as.Date(raw$POSTED_TIME)),
+         day_of_week_disbursed = wday(as.Date(raw$RAISED_TIME)),
+         week_requested = week(as.Date(raw$POSTED_TIME)),
+         week_disbursed = week(as.Date(raw$RAISED_TIME)),
+         month_requested = month(as.Date(raw$POSTED_TIME)),
+         month_disbursed = month(as.Date(raw$RAISED_TIME)),
+         hour_requested = hour(raw$POSTED_TIME),
+         hour_disbursed = hour(raw$RAISED_TIME),
+         day_of_month_requested = day(as.Date(raw$POSTED_TIME)),
+         day_of_month_disbursed = day(as.Date(raw$RAISED_TIME)),
+         year_requested = year(as.Date(raw$POSTED_TIME)),
+         year_disbursed = year(as.Date(raw$RAISED_TIME)),
+         gender = case_when(BORROWER_GENDERS == "male" ~ 1,
+                            BORROWER_GENDERS =="female" ~ 0,
+                            TRUE ~ -1)) %>%
+  #dropping gender, posted time, raised time; gender is converted to single character; posted and raised times decomposed into their parts (year, month, day, hour, week number, day of week)
+  select(-c("BORROWER_GENDERS", "POSTED_TIME", "RAISED_TIME"))
+
+#changing column names cause a) i hate typing capital letters in R, and b) i like accurate, descriptive column headers
+colnames(df) <- c("loan_id", "bio_description", "disbursed_usd", "requested_usd", "status", "sub_sector", "sector", "country_code","lender_count", "days_to_funded", 
+                  "day_of_week_requested","day_of_week_disbursed", "week_requested", "week_disbursed", "month_requested", "month_disbursed", "hour_requested", "hour_disbursed", 
+                  "day_of_month_requested", "day_of_month_disbursed", "year_requested", "year_disbursed", "gender")
+
+#Process bio text in preparation for text analysis, should you wish to use that.
+#Might be a "set-based" approach to applying text mining to a character vector, but I couldn't figure it out
+#Knew how to process the data in a loop, so went that way. If it were much more than 15K records, I'd not recommend using a loop.
+#the tm package is really better used with a corpus of documents; mergeing docs into one massive doc, but in this case,
+#I'm dealing with a data.frame and want to keep it row/column based.
+for (i in 1:nrow(df)){
+  #in the str_replace_all function, there were many stray special characters -- this removes anything that's not a number or letter.
+  df$bio_description[i] = str_replace_all(df$bio_description[i], "[^[:alnum:]]", " ")
+  corpus = Corpus(VectorSource(corpus <- Corpus(VectorSource(df$bio_description[i]))))
+  corpus<- tm_map(corpus, content_transformer(tolower))
+  corpus <- tm_map(corpus, removeNumbers)
+  corpus <- tm_map(corpus, removeWords, stopwords("english"))
+  corpus <- tm_map(corpus, removePunctuation)
+  corpus <- tm_map(corpus, stripWhitespace)  
+  #Not really a fan of reading/interpretting the stemming results;
+  #have commented it out for now, but you can stem it if you want.
+  #corpus <- tm_map(corpus, stemDocument)
+  
+  df$bio_description[i] = corpus[[1]]$content
+}
+
+#Now, let's take all empty/null values and convert them to -1.
+#In future analyses, you filter/exclude values/rows where there's a value of -1.
+df[is.na(df)] <- -1
+
+#Change the file path to whatever you wish; remember double backslash to escape the single backslash in the path.
+#alternatively, you can use a forward slash in lieu of double backslash; i.e. "c:/temp/MIS 740 Term Paper Scrubbed Dataset.csv"
+write_csv(df, "c:\\temp\\MIS 740 Term Paper Scrubbed Dataset.csv")
+write_csv(country, "c:\\temp\\MIS 740 County Dimension Table.csv")
+#Only necessary if you choose NOT to add in week, month, hour, day of month, etc. attributes into the table
+#If you were going to create a snowflake data model in Power BI (i.e. fact & dimension tables), then you'd want
+#to write this file out and modify the above mutate statement.
+write_csv(calendar, "c:\\temp\\MIS 740 Calendar Dimension Table.csv")
+
+```
+
+```{r fig.height=8, fig.width=15}
+df %>%
+  filter(df$year_disbursed > 0 & df$country_code == "US") %>%
+  group_by(year_disbursed, sub_sector) %>%
+  summarize(total_funding = sum(disbursed_usd)) %>%
+  filter(total_funding >= 75000) %>%
+  ggplot(aes(x=reorder(sub_sector, total_funding), y=total_funding, fill = as.factor(year_disbursed))) +
+    geom_col()+
+    scale_y_continuous(breaks= seq(0,3000000,500000), labels = scales::dollar_format())+
+    coord_flip()+
+  labs(y="Total Dollars Funded/Disbursed",
+       x ="Sub-Sector",
+       title="Kiva Funding -- Total Dollars by Sector",
+       subtitle = "2011 - 2020")  +
+  facet_grid(. ~ year_disbursed)
+
+```
+
